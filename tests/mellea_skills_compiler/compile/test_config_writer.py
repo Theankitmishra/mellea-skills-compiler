@@ -8,6 +8,11 @@ representation choices.
 
 from __future__ import annotations
 
+import ast
+import warnings
+
+import pytest
+
 from mellea_skills_compiler.compile.writers import config_writer
 
 
@@ -144,3 +149,39 @@ class TestConfigWriterRender:
         source = writer.render(emission)
         assert "DOCSTRING" in source
         assert "triple" in source
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            'NAME="Ubuntu"\nVERSION="22.04"',
+            'line 1\n""',
+            "line 1\n\\",
+            "a\\nb\nc",
+            "C:\\path\\file\nnext",
+            "C:\\path\nnext",
+            "a\rb\nc",
+            "a\x00b\nc",
+            'has """triple""" quotes\nand newline',
+        ],
+    )
+    def test_multiline_edge_cases_roundtrip_without_syntax_errors_or_warnings(self, value):
+        writer = _load_writer()
+        emission = {
+            "constants": [
+                {"name": "CFG_VAL", "value": value, "type": "str", "category": "C8"},
+                {
+                    "name": "NESTED_VAL",
+                    "value": {"items": [value]},
+                    "type": "dict",
+                    "category": "C8",
+                },
+            ]
+        }
+        source = writer.render(emission)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            ast.parse(source)
+            ns: dict = {}
+            exec(compile(source, "<config>", "exec"), ns)
+        assert ns["CFG_VAL"] == value
+        assert ns["NESTED_VAL"] == {"items": [value]}
