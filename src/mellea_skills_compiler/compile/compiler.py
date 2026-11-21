@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, Optional
@@ -121,17 +122,23 @@ def _derive_mellea_package_name(spec_path: Path, frontmatter: Optional[Dict]) ->
 
     For .md sources, prefer the frontmatter `name:` field; fall back to the
     parent directory name. For directory inputs (multi-file runtimes), use
-    the directory name.
+    the directory name. Normalises non-identifier characters to underscores
+    and prefixes `_` when needed so the result is always a valid Python
+    identifier (e.g. skill names starting with a digit).
     """
     if spec_path.is_dir():
         raw = spec_path.name
     else:
         raw = (frontmatter or {}).get("name") or spec_path.parent.name
-    name = str(raw).lower().replace("-", "_").replace(" ", "_")
-    while "__" in name:
-        name = name.replace("__", "_")
-    name = name.strip("_") or "skill"
-    return f"{name}_mellea"
+    normalized = "".join(
+        ch if (ch == "_" or f"_{ch}".isidentifier()) else "_"
+        for ch in str(raw).lower()
+    )
+    name = re.sub(r"_+", "_", normalized).strip("_") or "skill"
+    package_name = f"{name}_mellea"
+    if not package_name.isidentifier():
+        package_name = f"_{package_name}"
+    return package_name
 
 
 def validate(package_dir: Path, *, no_run: bool, all_fixtures: bool) -> None:

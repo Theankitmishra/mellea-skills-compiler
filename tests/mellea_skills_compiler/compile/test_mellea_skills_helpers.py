@@ -78,6 +78,42 @@ class TestDerivePackageName:
         result = _derive_mellea_package_name(Path("/spec.md"), {"name": ""})
         assert result == "skill_mellea"
 
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1password", "_1password_mellea"),
+            ("2fa-helper", "_2fa_helper_mellea"),
+            ("_1password_", "_1password_mellea"),
+            (123, "_123_mellea"),
+            ("1.0", "_1_0_mellea"),
+            ("v1.0-skill", "v1_0_skill_mellea"),
+            ("---", "skill_mellea"),
+        ],
+    )
+    def test_prefixes_underscore_when_name_starts_with_digit(self, raw, expected):
+        result = _derive_mellea_package_name(Path("/x/y/spec.md"), {"name": raw})
+        assert result == expected
+        assert result.isidentifier()
+
+    def test_digit_dir_input_and_parseable_lint(self, tmp_path):
+        from mellea_skills_compiler.compile.lints import lint_parseable
+
+        skill_dir = tmp_path / "1password"
+        skill_dir.mkdir()
+        assert _derive_mellea_package_name(skill_dir, None) == "_1password_mellea"
+
+        pkg_name = _derive_mellea_package_name(skill_dir / "spec.md", {})
+        assert pkg_name == "_1password_mellea"
+        assert pkg_name.isidentifier()
+
+        pkg_dir = skill_dir / pkg_name
+        pkg_dir.mkdir()
+        (pkg_dir / "__init__.py").write_text("")
+        (pkg_dir / "pipeline.py").write_text("def run_pipeline() -> str:\n    return 'ok'\n")
+
+        lint_result = lint_parseable(pkg_dir)
+        assert lint_result.verdict == "pass", [f.message for f in lint_result.failures]
+
 
 class TestMirrorCompanionDirs:
     """Rule OUT-6: mirror scripts/, references/, assets/ from skill -> package."""
