@@ -284,6 +284,65 @@ class TestBundledAssetPathResolution:
                 result.files_checked == 0
             ), "fixtures/ files should not be counted as checked"
 
+    def test_skips_copied_companion_directories(self):
+        """Files under scripts/, references/, assets/ are copied upstream assets and must be skipped."""
+        script_content = (
+            "from pathlib import Path\n"
+            "assets_dir = Path(__file__).parent.parent / 'assets'\n"
+            "ref_dir = Path('/tmp/whatever') / 'references' / 'doc.md'\n"
+        )
+        nested_script = (
+            "import os\n"
+            "p = os.path.join('/tmp/whatever', 'scripts', 'helper.sh')\n"
+        )
+        generated_ok = (
+            "from pathlib import Path\n"
+            "p = Path(__file__).parent / 'scripts' / 'fetch.py'\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = _make_package(
+                Path(tmp),
+                {
+                    "scripts/fetch.py": script_content,
+                    "scripts/nested/run.py": nested_script,
+                    "references/example.py": script_content,
+                    "assets/build.py": script_content,
+                    "tools.py": generated_ok,
+                },
+            )
+            result = lint_bundled_asset_path_resolution(pkg)
+            assert result.verdict == "pass", (
+                f"Copied companion directories should be excluded from this lint; "
+                f"got {result.verdict} with failures {[f.message for f in result.failures]}"
+            )
+            assert result.files_checked == 1, (
+                f"Only generated tools.py should be checked, got {result.files_checked}"
+            )
+
+    def test_still_flags_generated_code_when_companion_dirs_skipped(self):
+        """Skipping scripts/ must not suppress failures in generated Step 5 files."""
+        script_content = (
+            "from pathlib import Path\n"
+            "assets_dir = Path(__file__).parent.parent / 'assets'\n"
+        )
+        bad_generated = (
+            "from pathlib import Path\n"
+            "p = Path('/tmp/whatever') / 'scripts' / 'fetch.py'\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = _make_package(
+                Path(tmp),
+                {
+                    "scripts/fetch.py": script_content,
+                    "tools.py": bad_generated,
+                },
+            )
+            result = lint_bundled_asset_path_resolution(pkg)
+            assert result.verdict == "fail"
+            assert result.files_checked == 1
+            assert len(result.failures) == 1
+            assert result.failures[0].file == "tools.py"
+
     def test_dedups_failures_in_chain(self):
         """A chained Path(repo_root) / 'scripts' / 'bash' / 'x.sh' produces ONE failure."""
         content = (

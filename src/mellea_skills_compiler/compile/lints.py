@@ -175,10 +175,19 @@ def _node_repr(node: ast.AST) -> str:
         return f"<{type(node).__name__}>"
 
 
-def _is_skipped_path(rel_path: str) -> bool:
-    """fixtures/ are tests, intermediate/ is metadata — neither is runtime code."""
+def _is_skipped_path(rel_path: str, *, skip_bundled: bool = False) -> bool:
+    """fixtures/ are tests, intermediate/ is metadata — neither is runtime code.
+
+    When ``skip_bundled`` is True, copied companion directories
+    (``scripts/``, ``references/``, ``assets/``) are also excluded because they
+    contain upstream skill assets rather than Step 5 generated code.
+    """
     parts = rel_path.replace("\\", "/").split("/")
-    return parts[0] in ("fixtures", "intermediate") or "__pycache__" in parts
+    if parts[0] in ("fixtures", "intermediate") or "__pycache__" in parts:
+        return True
+    if skip_bundled and len(parts) > 1 and parts[0] in _BUNDLED_DIRS:
+        return True
+    return False
 
 
 def _collect_file_root_aliases(tree: ast.AST) -> set[str]:
@@ -239,7 +248,7 @@ def lint_bundled_asset_path_resolution(package_dir: Path) -> LintResult:
     py_files: List[Path] = []
     for p in sorted(package_dir.rglob("*.py")):
         rel = p.relative_to(package_dir).as_posix()
-        if not _is_skipped_path(rel):
+        if not _is_skipped_path(rel, skip_bundled=True):
             py_files.append(p)
     result.files_checked = len(py_files)
 
