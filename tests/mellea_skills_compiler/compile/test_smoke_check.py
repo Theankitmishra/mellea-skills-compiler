@@ -363,3 +363,160 @@ class TestClassifyExceptionWithSkillDir:
         reason = _classify_exception(ConnectionError("nope"))
         assert reason is not None
         assert reason.startswith("backend unreachable: ConnectionError")
+
+
+class TestMissingFixtureInputPathClassification:
+    """Missing or placeholder fixture input paths should classify as skipped."""
+
+    def test_file_not_found_with_filename_matching_fixture_input(self):
+        exc = FileNotFoundError(2, "No such file or directory", "/path/to/test/data")
+        reason = _classify_exception(
+            exc,
+            fixture_inputs={"data_path": "/path/to/test/data"},
+        )
+        assert reason is not None
+        assert "fixture input path" in reason
+        assert "/path/to/test/data" in reason
+        assert "placeholder" in reason
+
+    def test_file_not_found_without_filename_attribute_matched_from_message(self):
+        exc = FileNotFoundError("Input file not found: /path/to/test/data.csv")
+        assert exc.filename is None
+        reason = _classify_exception(
+            exc,
+            fixture_inputs={"file_path": "/path/to/test/data.csv"},
+        )
+        assert reason is not None
+        assert "fixture input path" in reason
+        assert "/path/to/test/data.csv" in reason
+
+    def test_file_not_found_for_child_of_nonexistent_fixture_dir(self):
+        exc = FileNotFoundError(
+            2, "No such file or directory", "/path/to/test/dir/items.json"
+        )
+        reason = _classify_exception(
+            exc,
+            fixture_inputs={"data_dir": "/path/to/test/dir"},
+        )
+        assert reason is not None
+        assert "/path/to/test/dir" in reason
+
+    def test_not_a_directory_error_on_placeholder_and_existing_file(self, tmp_path):
+        placeholder_exc = NotADirectoryError(
+            20, "Not a directory", "/path/to/test/dir"
+        )
+        reason_placeholder = _classify_exception(
+            placeholder_exc,
+            fixture_inputs={"input_dir": "/path/to/test/dir"},
+        )
+        assert reason_placeholder is not None
+        assert "/path/to/test/dir" in reason_placeholder
+
+        regular_file = tmp_path / "regular.txt"
+        regular_file.write_text("not a dir")
+        file_exc = NotADirectoryError(20, "Not a directory", str(regular_file))
+        reason_file = _classify_exception(
+            file_exc,
+            fixture_inputs={"input_dir": str(regular_file)},
+        )
+        assert reason_file is not None
+        assert str(regular_file) in reason_file
+
+    def test_nested_list_and_positional_string_fixture_inputs(self):
+        list_exc = FileNotFoundError(2, "No such file or directory", "/path/to/b.txt")
+        reason_list = _classify_exception(
+            list_exc,
+            fixture_inputs={"files": ["/path/to/a.txt", "/path/to/b.txt"]},
+        )
+        assert reason_list is not None
+        assert "/path/to/b.txt" in reason_list
+
+        str_exc = FileNotFoundError(2, "No such file or directory", "/path/to/test/data")
+        reason_str = _classify_exception(
+            str_exc,
+            fixture_inputs="/path/to/test/data",
+        )
+        assert reason_str is not None
+        assert "/path/to/test/data" in reason_str
+
+    def test_relative_missing_fixture_input_resolved_against_run_dir(self, tmp_path):
+        resolved_missing = (tmp_path / "unbundled/sample.csv").resolve()
+        exc = FileNotFoundError(2, "No such file or directory", str(resolved_missing))
+        reason = _classify_exception(
+            exc,
+            fixture_inputs={"input_path": "unbundled/sample.csv"},
+            run_dir=tmp_path,
+        )
+        assert reason is not None
+        assert "unbundled/sample.csv" in reason
+
+    def test_negative_internal_missing_file_returns_none(self):
+        exc = FileNotFoundError(2, "No such file or directory", "references/prompt.txt")
+        reason = _classify_exception(
+            exc,
+            fixture_inputs={"query": "hello"},
+        )
+        assert reason is None
+
+    def test_negative_plain_string_substring_in_internal_path_returns_none(self):
+        exc = FileNotFoundError(
+            2, "No such file or directory", "references/positive_template.txt"
+        )
+        reason = _classify_exception(
+            exc,
+            fixture_inputs={"mode": "positive"},
+        )
+        assert reason is None
+
+    def test_negative_existing_fixture_dir_missing_internal_file_returns_none(
+        self, tmp_path
+    ):
+        missing_internal = tmp_path / "missing_internal.json"
+        exc = FileNotFoundError(2, "No such file or directory", str(missing_internal))
+        reason = _classify_exception(
+            exc,
+            fixture_inputs={"work_dir": str(tmp_path)},
+            run_dir=tmp_path,
+        )
+        assert reason is None
+
+    def test_negative_none_fixture_inputs_returns_none(self):
+        exc = FileNotFoundError(2, "No such file or directory", "/path/to/test/data")
+        reason = _classify_exception(exc, fixture_inputs=None)
+        assert reason is None
+
+    def test_run_smoke_check_skips_placeholder_input_path(self, monkeypatch, tmp_path):
+        def pipeline_fn(input_path):
+            raise FileNotFoundError(f"File not found: {input_path}")
+
+        fixtures = [
+            Fixture(
+                id="positive_case",
+                context={"input_path": "/path/to/test/data"},
+                description="File input fixture using placeholder path",
+            )
+        ]
+        monkeypatch.setattr(
+            "mellea_skills_compiler.compile.smoke_check.load_skill_pipeline",
+            lambda d: pipeline_fn,
+        )
+        monkeypatch.setattr(
+            "mellea_skills_compiler.compile.smoke_check.load_fixtures",
+            lambda d: fixtures,
+        )
+
+        result = run_smoke_check(tmp_path, all_fixtures=False)
+
+        assert result.overall_verdict == "skipped"
+        assert result.exit_code == 0
+        assert len(result.fixtures) == 1
+        assert result.fixtures[0].verdict == "skipped"
+        assert result.fixtures[0].skipped_reason is not None
+        assert "placeholder" in result.fixtures[0].skipped_reason
+        assert "/path/to/test/data" in result.fixtures[0].skipped_reason
+
+        report = json.loads((tmp_path / "intermediate" / "step_7b_report.json").read_text())
+        assert report["overall_verdict"] == "skipped"
+        assert report["fixtures"][0]["verdict"] == "skipped"
+        assert "/path/to/test/data" in report["fixtures"][0]["skipped_reason"]
+

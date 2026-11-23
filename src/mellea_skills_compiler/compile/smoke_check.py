@@ -134,12 +134,138 @@ class SmokeRunResult:
         return 0
 
 
+_FILE_INPUT_KEY_HINTS = (
+    "path",
+    "file",
+    "filename",
+    "dir",
+    "folder",
+    "source",
+    "input",
+    "doc",
+    "archive",
+    "bundle",
+    "repo",
+    "root",
+    "location",
+    "uri",
+)
+
+
+def _looks_like_path_input(key: Optional[str], value: str) -> bool:
+    """Return True if a fixture input value plausibly represents a file or directory path."""
+    if not value or "\n" in value or value in {".", "..", "/"}:
+        return False
+    if "/" in value or "\\" in value or value.startswith(("~", ".")):
+        return True
+    if " " not in value and bool(Path(value).suffix):
+        return True
+    if key is not None and " " not in value:
+        keyl = key.lower()
+        if any(hint in keyl for hint in _FILE_INPUT_KEY_HINTS):
+            return True
+    return False
+
+
+def _iter_fixture_path_candidates(
+    fixture_inputs: Any, key: Optional[str] = None
+) -> List[str]:
+    """Extract plausible path strings from fixture inputs recursively."""
+    if isinstance(fixture_inputs, Fixture):
+        fixture_inputs = fixture_inputs.context
+    candidates: List[str] = []
+    if isinstance(fixture_inputs, dict):
+        for k, v in fixture_inputs.items():
+            candidates.extend(_iter_fixture_path_candidates(v, key=str(k)))
+    elif isinstance(fixture_inputs, (list, tuple, set)):
+        for item in fixture_inputs:
+            candidates.extend(_iter_fixture_path_candidates(item, key=key))
+    elif isinstance(fixture_inputs, Path):
+        text = str(fixture_inputs).strip()
+        if text:
+            candidates.append(text)
+    elif isinstance(fixture_inputs, str):
+        stripped = fixture_inputs.strip()
+        if _looks_like_path_input(key, stripped):
+            candidates.append(stripped)
+    return candidates
+
+
+def _match_missing_fixture_input_path(
+    exc: BaseException,
+    fixture_inputs: Any,
+    run_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Return the matching fixture input path if ``exc`` was caused by it."""
+    if not isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+        return None
+    if fixture_inputs is None:
+        return None
+
+    base_dir = run_dir if run_dir is not None else Path.cwd()
+    err_text = str(exc)
+
+    for raw in _iter_fixture_path_candidates(fixture_inputs):
+        raw_path = Path(raw).expanduser()
+        resolved_cand = (
+            raw_path if raw_path.is_absolute() else (base_dir / raw_path)
+        ).resolve(strict=False)
+
+        # If the fixture input path itself exists as expected on disk, any
+        # FileNotFoundError/NotADirectoryError is an internal package bug.
+        if isinstance(exc, NotADirectoryError):
+            if resolved_cand.is_dir():
+                continue
+        else:
+            if resolved_cand.exists() or (raw_path.is_absolute() and raw_path.exists()):
+                continue
+
+        for fname in (getattr(exc, "filename", None), getattr(exc, "filename2", None)):
+            if not fname:
+                continue
+            err_raw = Path(str(fname)).expanduser()
+            err_resolved = (
+                err_raw if err_raw.is_absolute() else (base_dir / err_raw)
+            ).resolve(strict=False)
+            if (
+                err_resolved == resolved_cand
+                or err_resolved.is_relative_to(resolved_cand)
+                or err_raw == raw_path
+                or err_raw.is_relative_to(raw_path)
+            ):
+                return raw
+
+        seen_forms = set()
+        for form in (
+            raw,
+            raw_path.as_posix(),
+            str(raw_path),
+            resolved_cand.as_posix(),
+            str(resolved_cand),
+        ):
+            if not form or form in seen_forms:
+                continue
+            seen_forms.add(form)
+            if "/" in form or "\\" in form:
+                pattern = rf"(?:^|[\s'\"=:(])({re.escape(form)})(?=$|[\s'\"/\\:,)\]])"
+            else:
+                pattern = rf"(?<![\w/\\.-]){re.escape(form)}(?![\w.-])"
+            if re.search(pattern, err_text):
+                return raw
+
+    return None
+
+
 def _classify_exception(
-    exc: BaseException, skill_dir: Optional[Path] = None
+    exc: BaseException,
+    skill_dir: Optional[Path] = None,
+    fixture_inputs: Optional[Any] = None,
+    fixture: Optional[Fixture] = None,
+    run_dir: Optional[Path] = None,
 ) -> Optional[str]:
     """Return a non-None 'skipped' reason if the exception is environmental.
 
-    Two classes of skip:
+    Three classes of skip:
 
     1. Backend unreachable — stdlib socket/connection errors, httpx/requests
        library variants (by class name to avoid hard imports), HTTP auth
@@ -150,9 +276,15 @@ def _classify_exception(
        the user just needs ``pip install -e .`` before runtime verification.
        Distinguished from a real code bug (LLM imports something it didn't
        declare), which is left to fall through to the failed path.
+    3. Missing fixture input path — a ``FileNotFoundError`` or
+       ``NotADirectoryError`` caused by a nonexistent or placeholder path in
+       the fixture's own inputs rather than a missing bundled package asset.
     """
     cls_name = type(exc).__name__
     cls_module = type(exc).__module__
+
+    if fixture_inputs is None and fixture is not None:
+        fixture_inputs = fixture.context
 
     # Declared-dependency-missing — environmental, not a code bug.
     # Checked first so a ModuleNotFoundError that LOOKS network-like (e.g.
@@ -166,6 +298,15 @@ def _classify_exception(
                 f"it; run `pip install -e .` in the skill directory and "
                 f"re-run the smoke check to verify runtime behaviour."
             )
+
+    matched_path = _match_missing_fixture_input_path(
+        exc, fixture_inputs, run_dir=run_dir
+    )
+    if matched_path is not None:
+        return (
+            f"fixture input path {matched_path!r} does not exist "
+            f"(fixture uses a placeholder or unbundled input path): {cls_name}: {exc}"
+        )
 
     # stdlib network errors
     if isinstance(
@@ -264,12 +405,12 @@ def _run_one_fixture(
     started = time.time()
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
+        # Run the fixture from the package directory so package-relative input
+        # paths (e.g. 'references/example_patient.json' bundled in the package)
+        # resolve the same way they do for an installed skill, rather than
+        # against the compiler's CWD. contextlib.chdir restores CWD afterward.
+        run_dir = package_dir if package_dir is not None else Path.cwd()
         try:
-            # Run the fixture from the package directory so package-relative input
-            # paths (e.g. 'references/example_patient.json' bundled in the package)
-            # resolve the same way they do for an installed skill, rather than
-            # against the compiler's CWD. contextlib.chdir restores CWD afterward.
-            run_dir = package_dir if package_dir is not None else Path.cwd()
             with contextlib.chdir(run_dir):
                 if isinstance(fixture.context, dict):
                     pipeline_fn(**fixture.context)
@@ -277,7 +418,12 @@ def _run_one_fixture(
                     pipeline_fn(fixture.context)
         except BaseException as exc:  # noqa: BLE001 — we re-classify all
             duration = time.time() - started
-            skipped_reason = _classify_exception(exc, skill_dir=skill_dir)
+            skipped_reason = _classify_exception(
+                exc,
+                skill_dir=skill_dir,
+                fixture_inputs=fixture.context,
+                run_dir=run_dir,
+            )
             if skipped_reason:
                 LOGGER.warning(
                     "Fixture smoke-check skipped — %s. Re-run `mellea-skills validate <pkg> --run` "
