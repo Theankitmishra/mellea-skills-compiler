@@ -8,10 +8,41 @@ from mellea_skills_compiler.toolkit.logging import configure_logger
 LOGGER = configure_logger()
 
 
-# Defaults for the LLM backend and model that compiled skills use at runtime.
+# Package/repo roots used to locate compiler assets (.claude/, .pi/) independent
+# of the caller's current working directory.
+_PACKAGE_DIR = Path(__file__).resolve().parents[1]
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+_RUNTIME_DEFAULTS_REL = Path(".claude/data/runtime_defaults.json")
 # Sourced from .claude/data/runtime_defaults.json with optional CLI overrides.
-_RUNTIME_DEFAULTS_PATH = Path(".claude/data/runtime_defaults.json")
+_RUNTIME_DEFAULTS_PATH = _PACKAGE_ROOT / _RUNTIME_DEFAULTS_REL
 _RUNTIME_DEFAULTS_FALLBACK = {"backend": "ollama", "model_id": "granite4.1:3b"}
+
+
+def resolve_package_path(relative_path: str | Path) -> Path:
+    """Resolve a compiler asset path (e.g. ``.claude/...``, ``.pi/...``) from the package.
+
+    Checks the package directory first (for wheel-bundled data) and then the
+    repository/editable-install root. Raises ``FileNotFoundError`` when the
+    asset cannot be found in either location rather than falling back to CWD.
+    """
+    rel = Path(relative_path)
+    for root in (_PACKAGE_DIR, _PACKAGE_ROOT):
+        candidate = root / rel
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"Compiler asset {rel.as_posix()!r} not found in installed package "
+        f"(checked {_PACKAGE_DIR} and {_PACKAGE_ROOT}). "
+        "Ensure mellea-skills-compiler is installed from a complete checkout "
+        "(e.g. `pip install -e .`)."
+    )
+
+
+def _resolve_runtime_defaults_path() -> Path:
+    bundled = _PACKAGE_DIR / _RUNTIME_DEFAULTS_REL
+    if bundled.exists():
+        return bundled
+    return _RUNTIME_DEFAULTS_PATH
 
 
 def resolve_runtime_defaults(
@@ -27,20 +58,28 @@ def resolve_runtime_defaults(
     file_backend = _RUNTIME_DEFAULTS_FALLBACK["backend"]
     file_model_id = _RUNTIME_DEFAULTS_FALLBACK["model_id"]
     source = "built-in fallback"
-    if _RUNTIME_DEFAULTS_PATH.exists():
+    defaults_path = _resolve_runtime_defaults_path()
+    if defaults_path.exists():
         try:
-            data = json.loads(_RUNTIME_DEFAULTS_PATH.read_text())
+            data = json.loads(defaults_path.read_text())
             file_backend = data.get("backend", file_backend)
             file_model_id = data.get("model_id", file_model_id)
-            source = f"defaults file ({_RUNTIME_DEFAULTS_PATH})"
+            source = f"defaults file ({defaults_path})"
         except (json.JSONDecodeError, OSError) as exc:
             LOGGER.warning(
                 "Could not read %s (%s). Using built-in fallback values: backend=%r, model_id=%r.",
-                _RUNTIME_DEFAULTS_PATH,
+                defaults_path,
                 exc,
                 file_backend,
                 file_model_id,
             )
+    else:
+        LOGGER.warning(
+            "Runtime defaults file not found at %s. Using built-in fallback values: backend=%r, model_id=%r.",
+            defaults_path,
+            file_backend,
+            file_model_id,
+        )
     if skill_backend_override or skill_model_override:
         source = "command-line override"
     return (

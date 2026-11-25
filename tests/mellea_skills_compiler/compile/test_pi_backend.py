@@ -592,7 +592,7 @@ class TestHelperMethods:
 class TestRenderPromptTemplates:
     """Tests for _render_prompt_templates path substitution."""
 
-    def test_substitutes_intermediate_paths(self, tmp_path, monkeypatch):
+    def test_substitutes_intermediate_paths(self, tmp_path):
         src = tmp_path / ".pi" / "prompts"
         src.mkdir(parents=True)
         (src / "mellea-fy-classify.md").write_text(
@@ -601,11 +601,17 @@ class TestRenderPromptTemplates:
             "Locate `<package_dir>/intermediate/` and `<name>_mellea/intermediate/`.\n"
         )
         (src / "other.md").write_text("`intermediate/x.json`")
-        monkeypatch.chdir(tmp_path)
+        claude_root = tmp_path / ".claude"
+        claude_root.mkdir()
         out = tmp_path / "out"
         out.mkdir()
 
-        _render_prompt_templates(Path("skills/foo/foo_mellea"), out)
+        _render_prompt_templates(
+            Path("skills/foo/foo_mellea"),
+            out,
+            prompts_src=src,
+            claude_root=claude_root,
+        )
 
         text = (out / "mellea-fy-classify.md").read_text()
         assert "`skills/foo/foo_mellea/intermediate/classification.json`" in text
@@ -614,7 +620,7 @@ class TestRenderPromptTemplates:
         assert "<package_name>" not in text
         assert not (out / "other.md").exists()
 
-    def test_substitutes_package_dir_paths(self, tmp_path, monkeypatch):
+    def test_substitutes_package_dir_paths(self, tmp_path):
         src = tmp_path / ".pi" / "prompts"
         src.mkdir(parents=True)
         (src / "mellea-fy-artifacts.md").write_text(
@@ -622,60 +628,106 @@ class TestRenderPromptTemplates:
             "Write `<package_dir>/melleafy.json`.\n"
             "Repair accepts any compiled package (`<name>_mellea/`).\n"
         )
-        monkeypatch.chdir(tmp_path)
+        claude_root = tmp_path / ".claude"
+        claude_root.mkdir()
         out = tmp_path / "out"
         out.mkdir()
 
-        _render_prompt_templates(Path("skills/foo/foo_mellea"), out)
+        _render_prompt_templates(
+            Path("skills/foo/foo_mellea"),
+            out,
+            prompts_src=src,
+            claude_root=claude_root,
+        )
 
         text = (out / "mellea-fy-artifacts.md").read_text()
         assert "inside `skills/foo/foo_mellea/`" in text
         assert "`skills/foo/foo_mellea/melleafy.json`" in text
         assert "`<name>_mellea/`" in text
 
-    def test_makes_claude_paths_absolute(self, tmp_path, monkeypatch):
+    def test_makes_claude_paths_absolute(self, tmp_path):
         src = tmp_path / ".pi" / "prompts"
         src.mkdir(parents=True)
         (src / "mellea-fy-classify.md").write_text(
             "Conform to `.claude/schemas/classification.schema.json`."
         )
-        monkeypatch.chdir(tmp_path)
+        claude_root = tmp_path / ".claude"
+        claude_root.mkdir()
         out = tmp_path / "out"
         out.mkdir()
 
-        _render_prompt_templates(Path("skills/foo/foo_mellea"), out)
+        _render_prompt_templates(
+            Path("skills/foo/foo_mellea"),
+            out,
+            prompts_src=src,
+            claude_root=claude_root,
+        )
 
-        expected = f"`{(tmp_path / '.claude').resolve().as_posix()}/schemas/classification.schema.json`"
+        expected = f"`{claude_root.resolve().as_posix()}/schemas/classification.schema.json`"
         assert expected in (out / "mellea-fy-classify.md").read_text()
 
-    def test_leaves_unquoted_references_alone(self, tmp_path, monkeypatch):
+    def test_leaves_unquoted_references_alone(self, tmp_path):
         src = tmp_path / ".pi" / "prompts"
         src.mkdir(parents=True)
         tree = "```\npkg/\n    └── intermediate/\n```\n[REPAIR] Removing intermediate/x.json\n"
         (src / "mellea-fy.md").write_text(tree)
-        monkeypatch.chdir(tmp_path)
+        claude_root = tmp_path / ".claude"
+        claude_root.mkdir()
         out = tmp_path / "out"
         out.mkdir()
 
-        _render_prompt_templates(Path("skills/foo/foo_mellea"), out)
+        _render_prompt_templates(
+            Path("skills/foo/foo_mellea"),
+            out,
+            prompts_src=src,
+            claude_root=claude_root,
+        )
 
         assert (out / "mellea-fy.md").read_text() == tree
 
-    def test_rendered_templates_are_read_only(self, tmp_path, monkeypatch):
+    def test_rendered_templates_are_read_only(self, tmp_path):
         src = tmp_path / ".pi" / "prompts"
         src.mkdir(parents=True)
         (src / "mellea-fy-classify.md").write_text("spec")
-        monkeypatch.chdir(tmp_path)
+        claude_root = tmp_path / ".claude"
+        claude_root.mkdir()
         out = tmp_path / "out"
         out.mkdir()
 
-        _render_prompt_templates(Path("skills/foo/foo_mellea"), out)
+        _render_prompt_templates(
+            Path("skills/foo/foo_mellea"),
+            out,
+            prompts_src=src,
+            claude_root=claude_root,
+        )
 
         with pytest.raises(PermissionError):
             (out / "mellea-fy-classify.md").write_text("overwritten")
         with pytest.raises(PermissionError):
             (out / "mellea-fy-new.md").write_text("new")
         out.chmod(0o700)
+
+    def test_raises_when_prompts_dir_missing_or_empty(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        missing = tmp_path / "missing"
+        with pytest.raises(FileNotFoundError, match="not found"):
+            _render_prompt_templates(
+                Path("skills/foo/foo_mellea"),
+                out,
+                prompts_src=missing,
+                claude_root=tmp_path,
+            )
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        with pytest.raises(FileNotFoundError, match="mellea-fy"):
+            _render_prompt_templates(
+                Path("skills/foo/foo_mellea"),
+                out,
+                prompts_src=empty,
+                claude_root=tmp_path,
+            )
 
 
 def _assistant_end(stop_reason=None, error_message=None):
@@ -952,5 +1004,79 @@ def test_compile_passes_absolute_paths_to_pi(mock_popen, _record, backend, tmp_p
     argv = mock_popen.call_args[0][0]
     assert f"/mellea-fy {(tmp_path / 'skills/foo/spec.md').resolve()}" in argv
     system_prompt = argv[argv.index("--append-system-prompt") + 1]
+    repo_root = Path(__file__).resolve().parents[3]
     assert f"`{package_dir.resolve()}/intermediate/`" in system_prompt
-    assert f"{(tmp_path / '.claude/schemas').resolve()}/" in system_prompt
+    assert f"{(repo_root / '.claude/schemas').resolve()}/" in system_prompt
+
+
+def test_compile_fails_clearly_when_package_assets_missing(
+    backend, mock_context, tmp_path, monkeypatch
+):
+    from mellea_skills_compiler.compile import claude_directives
+
+    monkeypatch.setattr(claude_directives, "_PACKAGE_DIR", tmp_path / "missing_pkg")
+    monkeypatch.setattr(claude_directives, "_PACKAGE_ROOT", tmp_path / "missing_root")
+
+    result = backend.compile(mock_context)
+
+    assert result.success is False
+    assert result.error_message is not None
+    assert "not found in installed package" in result.error_message
+
+
+@patch("mellea_skills_compiler.compile.backends.pi.CompileMetadata.record_backend")
+@patch("mellea_skills_compiler.compile.backends.pi.subprocess.Popen")
+def test_compile_from_foreign_cwd_resolves_package_claude_and_pi_dirs(
+    mock_popen, _record, backend, tmp_path, monkeypatch
+):
+    """Compiling from outside the repo must resolve .claude and .pi from the package, not CWD."""
+    repo_root = Path(__file__).resolve().parents[3]
+    (tmp_path / ".claude" / "schemas").mkdir(parents=True)
+    (tmp_path / ".pi" / "prompts").mkdir(parents=True)
+    (tmp_path / ".pi" / "prompts" / "mellea-fy-classify.md").write_text(
+        "BOGUS CWD PROMPT `.claude/schemas/classification.schema.json`"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    package_dir = Path("skills/foo/foo_mellea")
+    (package_dir / "intermediate").mkdir(parents=True)
+    (package_dir / "intermediate" / "classification.json").write_text("{}")
+    Path("skills/foo/spec.md").write_text("# Foo")
+    context = CompilationContext(
+        spec_path=Path("skills/foo/spec.md"),
+        package_dir=package_dir,
+        intermediate_dir=package_dir / "intermediate",
+        model="granite3.3:8b",
+        timeout=300,
+        repair_mode=False,
+        skill_backend="ollama",
+        skill_model="granite4.1:3b",
+        refresh_cache=False,
+    )
+    events = [_assistant_end(), _pi_event_line({"type": "agent_settled"}), ""]
+    mock_process = MagicMock()
+    mock_process.stdout.readline.side_effect = events
+    mock_process.stderr.readline.side_effect = [""]
+    mock_process.poll.side_effect = [None] * (len(events) - 1) + [0]
+    mock_process.wait.return_value = 0
+    mock_popen.return_value = mock_process
+
+    rendered_prompts: dict[str, str] = {}
+
+    def capture_prompts(argv, **_kwargs):
+        prompt_dir = Path(argv[argv.index("--prompt-template") + 1])
+        rendered_prompts["classify"] = (prompt_dir / "mellea-fy-classify.md").read_text()
+        return mock_process
+
+    mock_popen.side_effect = capture_prompts
+
+    backend.compile(context)
+
+    argv = mock_popen.call_args[0][0]
+    system_prompt = argv[argv.index("--append-system-prompt") + 1]
+    expected_schemas = (repo_root / ".claude" / "schemas").resolve().as_posix()
+    expected_claude = (repo_root / ".claude").resolve().as_posix()
+    assert f"{expected_schemas}/" in system_prompt
+    assert str((tmp_path / ".claude").resolve()) not in system_prompt
+    assert "BOGUS CWD PROMPT" not in rendered_prompts["classify"]
+    assert f"`{expected_claude}/schemas/" in rendered_prompts["classify"]

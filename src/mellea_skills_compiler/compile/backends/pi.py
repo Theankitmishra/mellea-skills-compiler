@@ -36,6 +36,7 @@ from mellea_skills_compiler.compile.backend import (
 from mellea_skills_compiler.compile.claude_directives import (
     _WRAPPER_RENDERED_PATHS,
     build_pi_system_prompt,
+    resolve_package_path,
 )
 from mellea_skills_compiler.compile.metadata import CompileMetadata
 from mellea_skills_compiler.compile.writers.renderer import DEFAULT_WRITER_SPECS
@@ -45,9 +46,6 @@ from mellea_skills_compiler.toolkit.logging import configure_logger
 
 LOGGER = configure_logger()
 console = Console(log_time=True)
-
-# Project prompt templates, resolved against the cwd as pi itself does.
-_PI_PROMPTS_DIR = Path(".pi/prompts")
 
 # Backticked `intermediate/` references in the templates, bare or behind a
 # package-dir placeholder. Tree diagrams and example log lines are unquoted
@@ -205,7 +203,7 @@ class PiBackend:
                 context.defaults_source,
                 package_dir,
                 prompts_dir,
-                Path(".claude/schemas").resolve(),
+                resolve_package_path(".claude/schemas").resolve(),
             )
 
             pi_argv = self._build_pi_argv(
@@ -504,7 +502,13 @@ class PiBackend:
         return pi_argv
 
 
-def _render_prompt_templates(package_dir: Path, out_dir: Path) -> None:
+def _render_prompt_templates(
+    package_dir: Path,
+    out_dir: Path,
+    *,
+    prompts_src: Optional[Path] = None,
+    claude_root: Optional[Path] = None,
+) -> None:
     """Copy the mellea-fy prompt templates into ``out_dir`` with concrete paths.
 
     The templates say ``intermediate/<file>.json`` relative to the compiled
@@ -517,10 +521,31 @@ def _render_prompt_templates(package_dir: Path, out_dir: Path) -> None:
     Args:
         package_dir: The compiled package directory (e.g. ``skills/x/x_mellea``).
         out_dir: Directory to write the rewritten ``mellea-fy*.md`` files into.
+        prompts_src: Optional directory containing ``mellea-fy*.md`` templates;
+            defaults to the package's ``.pi/prompts`` directory.
+        claude_root: Optional ``.claude`` directory used to absolutise
+            ``.claude/`` references; defaults to the package's ``.claude`` dir.
     """
+    src_dir = prompts_src if prompts_src is not None else resolve_package_path(".pi/prompts")
+    if not src_dir.is_dir():
+        raise FileNotFoundError(
+            f"Pi prompt templates directory not found: {src_dir}"
+        )
+    templates = sorted(src_dir.glob("mellea-fy*.md"))
+    if not templates:
+        raise FileNotFoundError(
+            f"No mellea-fy*.md prompt templates found in {src_dir}"
+        )
+    resolved_claude = (
+        claude_root if claude_root is not None else resolve_package_path(".claude")
+    )
+    if not resolved_claude.is_dir():
+        raise FileNotFoundError(
+            f"Claude assets directory not found: {resolved_claude}"
+        )
     package = package_dir.as_posix()
-    claude_dir = f"`{Path('.claude').resolve().as_posix()}/"
-    for template in sorted(_PI_PROMPTS_DIR.glob("mellea-fy*.md")):
+    claude_dir = f"`{resolved_claude.resolve().as_posix()}/"
+    for template in templates:
         text = _INTERMEDIATE_REF.sub(f"`{package}/intermediate/", template.read_text())
         text = _PACKAGE_DIR_REF.sub(f"`{package}/", text)
         text = text.replace("`.claude/", claude_dir)

@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from mellea_skills_compiler.compile import claude_directives
 from mellea_skills_compiler.compile.claude_directives import (
     build_system_prompt,
+    resolve_package_path,
     resolve_runtime_defaults,
     write_runtime_directive,
 )
@@ -157,33 +159,59 @@ class TestMirrorCompanionDirs:
         assert mirrored == []
 
 
+class TestResolvePackagePath:
+    """Resolve package assets (.claude/, .pi/) independent of CWD."""
+
+    def test_resolves_assets_from_foreign_cwd(self, tmp_path, monkeypatch):
+        repo_root = Path(__file__).resolve().parents[3]
+        (tmp_path / ".claude" / "data").mkdir(parents=True)
+        (tmp_path / ".claude" / "data" / "runtime_defaults.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        resolved = resolve_package_path(".claude/data/runtime_defaults.json")
+
+        assert resolved.samefile(repo_root / ".claude" / "data" / "runtime_defaults.json")
+
+    def test_raises_clear_error_when_asset_missing(self, tmp_path, monkeypatch):
+        (tmp_path / "cwd_only" / ".claude" / "schemas").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path / "cwd_only")
+        monkeypatch.setattr(claude_directives, "_PACKAGE_DIR", tmp_path / "pkg")
+        monkeypatch.setattr(claude_directives, "_PACKAGE_ROOT", tmp_path / "root")
+
+        with pytest.raises(FileNotFoundError, match=r"\.claude/schemas"):
+            resolve_package_path(".claude/schemas")
+
+
 class TestResolveRuntimeDefaults:
     """Precedence: CLI override > defaults file > built-in fallback."""
 
-    def _write_defaults(self, tmp_path: Path, payload: str) -> None:
+    def _write_defaults(self, tmp_path: Path, payload: str, monkeypatch) -> Path:
         defaults_dir = tmp_path / ".claude" / "data"
-        defaults_dir.mkdir(parents=True)
-        (defaults_dir / "runtime_defaults.json").write_text(payload)
+        defaults_dir.mkdir(parents=True, exist_ok=True)
+        defaults_path = defaults_dir / "runtime_defaults.json"
+        defaults_path.write_text(payload)
+        monkeypatch.setattr(claude_directives, "_RUNTIME_DEFAULTS_PATH", defaults_path)
+        return defaults_path
 
     def test_uses_defaults_file_when_no_override(self, tmp_path, monkeypatch):
         self._write_defaults(
             tmp_path,
-            json.dumps({"backend": "ollama", "model_id": "granite4.1:3b"}),
+            json.dumps({"backend": "vllm", "model_id": "custom-model:1b"}),
+            monkeypatch,
         )
-        monkeypatch.chdir(tmp_path)
 
         backend, model_id, source = resolve_runtime_defaults(None, None)
 
-        assert backend == "ollama"
-        assert model_id == "granite4.1:3b"
+        assert backend == "vllm"
+        assert model_id == "custom-model:1b"
         assert "defaults file" in source
 
     def test_cli_backend_override_wins(self, tmp_path, monkeypatch):
         self._write_defaults(
             tmp_path,
             json.dumps({"backend": "ollama", "model_id": "granite4.1:3b"}),
+            monkeypatch,
         )
-        monkeypatch.chdir(tmp_path)
 
         backend, model_id, source = resolve_runtime_defaults("vllm", None)
 
@@ -195,8 +223,8 @@ class TestResolveRuntimeDefaults:
         self._write_defaults(
             tmp_path,
             json.dumps({"backend": "ollama", "model_id": "granite4.1:3b"}),
+            monkeypatch,
         )
-        monkeypatch.chdir(tmp_path)
 
         backend, model_id, source = resolve_runtime_defaults("vllm", "mistral-7b")
 
@@ -204,19 +232,22 @@ class TestResolveRuntimeDefaults:
         assert model_id == "mistral-7b"
         assert "command-line override" in source
 
-    def test_falls_back_to_builtin_when_file_missing(self, tmp_path, monkeypatch):
-        # No .claude/data/ written under tmp_path.
-        monkeypatch.chdir(tmp_path)
+    def test_falls_back_to_builtin_when_file_missing(self, tmp_path, monkeypatch, caplog):
+        missing = tmp_path / ".claude" / "data" / "runtime_defaults.json"
+        monkeypatch.setattr(claude_directives, "_RUNTIME_DEFAULTS_PATH", missing)
 
-        backend, model_id, source = resolve_runtime_defaults(None, None)
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            backend, model_id, source = resolve_runtime_defaults(None, None)
 
         assert backend == "ollama"
         assert model_id == "granite4.1:3b"
         assert "built-in fallback" in source
+        assert any("not found" in rec.getMessage() for rec in caplog.records)
 
     def test_falls_back_to_builtin_when_file_malformed(self, tmp_path, monkeypatch):
-        self._write_defaults(tmp_path, "{not valid json")
-        monkeypatch.chdir(tmp_path)
+        self._write_defaults(tmp_path, "{not valid json", monkeypatch)
 
         backend, model_id, source = resolve_runtime_defaults(None, None)
 
@@ -233,14 +264,29 @@ class TestResolveRuntimeDefaults:
         # `data.get("backend", file_backend)` returns the built-in fallback
         # for both keys; source is updated to "defaults file (...)" because
         # the read succeeded.
-        self._write_defaults(tmp_path, json.dumps({}))
-        monkeypatch.chdir(tmp_path)
+        self._write_defaults(tmp_path, json.dumps({}), monkeypatch)
 
         backend, model_id, source = resolve_runtime_defaults(None, None)
 
         assert backend == "ollama"
         assert model_id == "granite4.1:3b"
         assert "defaults file" in source
+
+    def test_resolves_package_defaults_from_foreign_cwd(self, tmp_path, monkeypatch):
+        """Compiling outside the repo root must read package defaults, not CWD."""
+        repo_root = Path(__file__).resolve().parents[3]
+        cwd_defaults = tmp_path / ".claude" / "data"
+        cwd_defaults.mkdir(parents=True)
+        (cwd_defaults / "runtime_defaults.json").write_text(
+            json.dumps({"backend": "vllm", "model_id": "wrong-cwd-model"})
+        )
+        monkeypatch.chdir(tmp_path)
+
+        backend, model_id, source = resolve_runtime_defaults(None, None)
+
+        assert backend == "ollama"
+        assert model_id == "granite4.1:3b"
+        assert str(repo_root / ".claude" / "data" / "runtime_defaults.json") in source
 
 
 class TestWriteRuntimeDirective:
