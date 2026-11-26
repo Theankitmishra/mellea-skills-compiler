@@ -21,12 +21,12 @@ def parse_spec_file(spec_path: Path) -> dict:
     """Parse a SKILL.md file into frontmatter dict + markdown body."""
     text = spec_path.read_text()
 
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", text, re.DOTALL)
+    match = re.match(r"^---\s*\n(.*?)\n---(?:\s*\n(.*))?$", text, re.DOTALL)
     if not match:
         return {"frontmatter": {}, "body": text, "path": str(spec_path)}
 
     frontmatter = yaml.safe_load(match.group(1)) or {}
-    body = match.group(2).strip()
+    body = (match.group(2) or "").strip()
 
     # Normalize allowed-tools: string → list
     tools_raw = frontmatter.get("allowed-tools", [])

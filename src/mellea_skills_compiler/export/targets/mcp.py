@@ -31,7 +31,11 @@ _TOOL_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 
 
 def translate_mcp(loaded: "LoadedContext") -> "TranslationPlan":
-    from mellea_skills_compiler.export.exporter import AdapterFile, TranslationPlan
+    from mellea_skills_compiler.export.exporter import (
+        AdapterFile,
+        TranslationPlan,
+        get_skill_description,
+    )
 
     manifest = loaded.manifest
     sig = loaded.sig
@@ -41,7 +45,9 @@ def translate_mcp(loaded: "LoadedContext") -> "TranslationPlan":
     modality = manifest.get("modality", "synchronous_oneshot")
 
     tool_name = _resolve_tool_name(manifest, package_name)
-    description = _get_description(manifest)
+    description = get_skill_description(
+        loaded, default=f"Invokes the {package_name} Mellea pipeline."
+    )
     is_async = modality in _ASYNC_MODALITIES
 
     server_py = _render_server_py(
@@ -138,26 +144,12 @@ def _resolve_tool_name(manifest: dict, package_name: str) -> str:
     return sanitized
 
 
-def _get_description(manifest: dict) -> str:
-    runtime_metadata = manifest.get("runtime_metadata", {})
-    if isinstance(runtime_metadata, dict) and runtime_metadata:
-        c1 = runtime_metadata.get("c1_identity", {})
-        if isinstance(c1, dict):
-            entries = c1.get("entries", [])
-            if entries and isinstance(entries[0], dict):
-                desc = entries[0].get("description", "")
-                if desc:
-                    return desc
-    categories = manifest.get("categories_resolved", {})
-    if isinstance(categories, dict):
-        c1 = categories.get("c1_identity", {})
-        if isinstance(c1, dict):
-            entries = c1.get("entries", [])
-            if entries and isinstance(entries[0], dict):
-                desc = entries[0].get("description", "")
-                if desc:
-                    return desc
-    return f"Invokes the {manifest.get('package_name', 'pipeline')} Mellea pipeline."
+def _escape_docstring(text: str) -> str:
+    """Escape backslashes and triple quotes so text is safe inside \"\"\"...\"\"\"."""
+    escaped = text.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+    if escaped.endswith('"'):
+        escaped = escaped[:-1] + '\\"'
+    return escaped
 
 
 def _render_param_list(sig: "ParsedSignature") -> str:
@@ -291,7 +283,7 @@ def _render_server_py(
         "\n"
         "@mcp.tool()\n"
         f"{fn_def} {tool_name}({param_list}) -> str:\n"
-        f'    """{description}"""\n'
+        f'    """{_escape_docstring(description)}"""\n'
         f"{tool_body}\n"
         "\n"
         "\n"

@@ -166,25 +166,38 @@ def test_deployment_guidance_mentions_pi_skills_root():
     assert "pi" in guidance.lower()
 
 
-def test_invocation_args_single_positional_includes_trailing_optional_params():
-    """run_pipeline(input_text: str, check_mode: str = "validate") is classified
-    single_positional (exactly one required param), but has two params total.
-    _invocation_args must pass both through as positional argv, not silently
-    drop the optional one — PR #57 review: clawdefender_mellea's check_mode
-    was silently ignored because only sys.argv[2] was ever emitted."""
-    from mellea_skills_compiler.export.targets.pi import _invocation_args
+def test_render_run_sh_synchronous_oneshot_calls_python_module():
+    """run.sh must delegate to `python -m <package> "$@"` so optional flags
+    like clawdefender_mellea's --check-mode are handled by the package CLI."""
+    from mellea_skills_compiler.export.targets.pi import _render_run_sh
 
-    params = [
-        {"name": "input_text", "type": "str", "required": True, "default": None},
-        {"name": "check_mode", "type": "str", "required": False, "default": '"validate"'},
-    ]
-    result = _invocation_args("single_positional", params)
-    assert result == "sys.argv[2], sys.argv[3]"
+    result = _render_run_sh(
+        modality="synchronous_oneshot",
+        package_name="clawdefender_mellea",
+        entry_module="pipeline",
+        entry_function="run_pipeline",
+        pattern="single_positional",
+        params=[
+            {"name": "input_text", "type": "str", "required": True, "default": None},
+            {"name": "check_mode", "type": "str", "required": False, "default": '"validate"'},
+        ],
+        export_version="0.1.0",
+    )
+    assert 'exec python -m clawdefender_mellea "$@"' in result
+    assert "sys.argv[2]" not in result
 
 
-def test_invocation_args_single_positional_with_no_optional_params_unchanged():
-    from mellea_skills_compiler.export.targets.pi import _invocation_args
+def test_render_run_sh_streaming_calls_unbuffered_python_module():
+    from mellea_skills_compiler.export.targets.pi import _render_run_sh
 
-    params = [{"name": "query", "type": "str", "required": True, "default": None}]
-    result = _invocation_args("single_positional", params)
-    assert result == "sys.argv[2]"
+    result = _render_run_sh(
+        modality="streaming",
+        package_name="weather_mellea",
+        entry_module="pipeline",
+        entry_function="run_pipeline",
+        pattern="single_positional",
+        params=[{"name": "query", "type": "str", "required": True, "default": None}],
+        export_version="0.1.0",
+    )
+    assert 'exec python -u -m weather_mellea "$@"' in result
+    assert "sys.argv[2]" not in result

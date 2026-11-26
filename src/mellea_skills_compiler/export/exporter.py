@@ -481,14 +481,14 @@ def _build_export_notes(plan: TranslationPlan, loaded: LoadedContext) -> str:
         ]
     elif target == "claude-code":
         next_steps = [
-            "1. Review `scripts/run.sh` — the generated script calls `run_pipeline`.",
+            f"1. Review `scripts/run.sh` — the generated script delegates to `python -m {manifest.get('package_name', '?')}`.",
             f"2. {install_step}",
             "3. Make executable: `chmod +x scripts/run.sh`",
             "4. Register under `.claude/skills/` and invoke via `bash scripts/run.sh <args>`.",
         ]
     elif target == "pi":
         next_steps = [
-            "1. Review `scripts/run.sh` — the generated script calls `run_pipeline`.",
+            f"1. Review `scripts/run.sh` — the generated script delegates to `python -m {manifest.get('package_name', '?')}`.",
             f"2. {install_step}",
             "3. Make executable: `chmod +x scripts/run.sh`",
             "4. Register under `.pi/skills/` (or `.agents/skills/`) and invoke via `bash scripts/run.sh <args>`.",
@@ -719,6 +719,57 @@ def run_export(inv: Invocation) -> EmitResult:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_description_from_skill_md(skill_md: Path) -> str:
+    """Return stripped frontmatter description from a SKILL.md file, or ''."""
+    from mellea_skills_compiler.toolkit.file_utils import parse_spec_file
+
+    try:
+        parsed = parse_spec_file(skill_md)
+    except Exception:
+        return ""
+    frontmatter = parsed.get("frontmatter")
+    if isinstance(frontmatter, dict):
+        desc = frontmatter.get("description")
+        if isinstance(desc, str) and desc.strip():
+            return desc.strip()
+    return ""
+
+
+def get_skill_description(
+    loaded: Optional[LoadedContext] = None,
+    *,
+    manifest: Optional[dict] = None,
+    default: str = "A Mellea pipeline skill.",
+) -> str:
+    """Resolve skill description from bundled SKILL.md, manifest C1 entry, or default."""
+    if loaded is not None:
+        if manifest is None:
+            manifest = loaded.manifest
+        candidate_dirs = [loaded.python_package_dir]
+        if loaded.package_source_dir != loaded.python_package_dir:
+            candidate_dirs.append(loaded.package_source_dir)
+        for candidate_dir in candidate_dirs:
+            skill_md = candidate_dir / "SKILL.md"
+            if skill_md.is_file():
+                desc = _extract_description_from_skill_md(skill_md)
+                if desc:
+                    return desc
+
+    if manifest:
+        for container_key in ("runtime_metadata", "categories_resolved"):
+            container = manifest.get(container_key, {})
+            if isinstance(container, dict):
+                c1 = container.get("c1_identity", {})
+                if isinstance(c1, dict):
+                    entries = c1.get("entries", [])
+                    if entries and isinstance(entries[0], dict):
+                        desc = entries[0].get("description", "")
+                        if isinstance(desc, str) and desc.strip():
+                            return desc.strip()
+
+    return default
 
 
 def _halt(code: int, msg: str) -> None:
